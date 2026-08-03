@@ -405,19 +405,34 @@ class _WlCard extends StatelessWidget {
                             style: TextStyle(
                                 fontSize: 12.5, color: Colors.grey.shade400)),
                       ],
-                      const Spacer(),
-                      if (onTwitterTap != null)
-                        InkWell(
-                          onTap: onTwitterTap,
-                          borderRadius: BorderRadius.circular(20),
-                          child: const Padding(
-                            padding: EdgeInsets.all(4),
-                            child: Icon(Icons.alternate_email,
-                                size: 18, color: Color(0xFF1DA1F2)),
-                          ),
-                        ),
                     ],
                   ),
+                  if (onTwitterTap != null && entry.twitterLink != null) ...[
+                    const SizedBox(height: 8),
+                    InkWell(
+                      onTap: onTwitterTap,
+                      child: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          const Icon(Icons.alternate_email,
+                              size: 14, color: Color(0xFF1DA1F2)),
+                          const SizedBox(width: 4),
+                          Flexible(
+                            child: Text(
+                              entry.twitterLink!,
+                              style: const TextStyle(
+                                fontSize: 13,
+                                color: Color(0xFF1DA1F2),
+                                decoration: TextDecoration.underline,
+                                decorationColor: Color(0xFF1DA1F2),
+                              ),
+                              overflow: TextOverflow.ellipsis,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ],
                 ],
               ),
             ),
