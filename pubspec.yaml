@@ -1,4 +1,4 @@
-name: Jadwal Mint NFT
+name: nft_wl_tracker
 description: Catatan Whitelist NFT (GTD/FCFS) pribadi.
 publish_to: 'none'
 version: 1.0.0+1
