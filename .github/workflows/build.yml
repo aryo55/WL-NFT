@@ -27,14 +27,23 @@ jobs:
         run: |
           mkdir -p /tmp/src
           cp -r lib /tmp/src/
+          cp -r assets /tmp/src/
           cp pubspec.yaml /tmp/src/
           flutter create . --project-name nft_wl_tracker --platforms android
-          rm -rf lib pubspec.yaml
+          rm -rf lib assets pubspec.yaml
           cp -r /tmp/src/lib .
+          cp -r /tmp/src/assets .
           cp /tmp/src/pubspec.yaml .
 
       - name: Install dependencies
         run: flutter pub get
+
+      - name: Allow opening browser links (Android 11+ package visibility)
+        run: |
+          sed -i 's|<application|<queries><intent><action android:name="android.intent.action.VIEW" /><category android:name="android.intent.category.BROWSABLE" /><data android:scheme="https" /></intent></queries><application|' android/app/src/main/AndroidManifest.xml
+
+      - name: Generate launcher icon
+        run: dart run flutter_launcher_icons
 
       - name: Build APK
         run: flutter build apk --release
