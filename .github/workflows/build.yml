@@ -54,12 +54,10 @@ jobs:
       - name: Enable core library desugaring (required by flutter_local_notifications)
         run: |
           sed -i 's|targetCompatibility = JavaVersion.VERSION_1_8|targetCompatibility = JavaVersion.VERSION_1_8\n        isCoreLibraryDesugaringEnabled = true|' android/app/build.gradle.kts
-          cat >> android/app/build.gradle.kts << 'EOF'
-
-dependencies {
-    coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.1.4")
-}
-EOF
+          echo '' >> android/app/build.gradle.kts
+          echo 'dependencies {' >> android/app/build.gradle.kts
+          echo '    coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.1.4")' >> android/app/build.gradle.kts
+          echo '}' >> android/app/build.gradle.kts
 
       - name: Generate launcher icon
         run: dart run flutter_launcher_icons
