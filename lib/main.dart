@@ -16,10 +16,10 @@ Future<void> main() async {
   tz.initializeTimeZones();
   try {
     final currentTimeZone = await FlutterTimezone.getLocalTimezone();
-    tz.setLocalLocation(tz.getLocation(currentTimeZone));
+    tz.setLocalLocation(tz.getLocation(currentTimeZone.identifier));
   } catch (_) {
     // If detection fails, notifications still work but may use device's
-    // default (UTC) reference Ã¢â‚¬â€ reminder time could be off in that case.
+    // default (UTC) reference ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â reminder time could be off in that case.
   }
 
   const androidInit = AndroidInitializationSettings('@mipmap/ic_launcher');
@@ -173,7 +173,7 @@ Future<void> scheduleReminder(WlEntry entry) async {
 
   await flutterLocalNotificationsPlugin.zonedSchedule(
     notifIdFor(entry.id),
-    'Mint sebentar lagi! Ã°Å¸Å¡â‚¬',
+    'Mint sebentar lagi! ÃƒÂ°Ã…Â¸Ã…Â¡Ã¢â€šÂ¬',
     '${entry.name} (${entry.type.label}) mint dalam ${entry.reminderMinutes} menit',
     tzTime,
     const NotificationDetails(
@@ -593,7 +593,7 @@ class _WlCard extends StatelessWidget {
                       child: Row(
                         mainAxisSize: MainAxisSize.min,
                         children: [
-                          const Text('Ã°Å¸ÂÂ¦', style: TextStyle(fontSize: 14)),
+                          const Text('ÃƒÂ°Ã…Â¸Ã‚ÂÃ‚Â¦', style: TextStyle(fontSize: 14)),
                           const SizedBox(width: 5),
                           Flexible(
                             child: Text(
@@ -618,7 +618,7 @@ class _WlCard extends StatelessWidget {
                     const SizedBox(height: 6),
                     Row(
                       children: [
-                        const Text('Ã°Å¸â€â€', style: TextStyle(fontSize: 12)),
+                        const Text('ÃƒÂ°Ã…Â¸Ã¢â‚¬ÂÃ¢â‚¬Â', style: TextStyle(fontSize: 12)),
                         const SizedBox(width: 4),
                         Text(
                           'Diingatkan ${entry.reminderMinutes} menit sebelum mint',
