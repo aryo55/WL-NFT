@@ -2,8 +2,35 @@ import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:url_launcher/url_launcher.dart';
+import 'package:flutter_local_notifications/flutter_local_notifications.dart';
+import 'package:flutter_timezone/flutter_timezone.dart';
+import 'package:timezone/data/latest.dart' as tz;
+import 'package:timezone/timezone.dart' as tz;
 
-void main() {
+final FlutterLocalNotificationsPlugin flutterLocalNotificationsPlugin =
+    FlutterLocalNotificationsPlugin();
+
+Future<void> main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+
+  tz.initializeTimeZones();
+  try {
+    final currentTimeZone = await FlutterTimezone.getLocalTimezone();
+    tz.setLocalLocation(tz.getLocation(currentTimeZone));
+  } catch (_) {
+    // If detection fails, notifications still work but may use device's
+    // default (UTC) reference â€” reminder time could be off in that case.
+  }
+
+  const androidInit = AndroidInitializationSettings('@mipmap/ic_launcher');
+  const initSettings = InitializationSettings(android: androidInit);
+  await flutterLocalNotificationsPlugin.initialize(initSettings);
+
+  final androidImpl = flutterLocalNotificationsPlugin
+      .resolvePlatformSpecificImplementation<
+          AndroidFlutterLocalNotificationsPlugin>();
+  await androidImpl?.requestNotificationsPermission();
+
   runApp(const NftWlTrackerApp());
 }
 
@@ -50,9 +77,12 @@ class WlEntry {
   final String id;
   String name;
   WlType type;
-  DateTime? mintDate; // optional
+  DateTime? mintDate; // date portion always meaningful when non-null
+  bool hasTime; // whether the time-of-day part of mintDate was set by user
   int? quantity; // optional
   String? twitterLink; // optional
+  bool reminderEnabled;
+  int reminderMinutes; // how many minutes before mint to notify (1-10)
   final DateTime createdAt;
 
   WlEntry({
@@ -60,8 +90,11 @@ class WlEntry {
     required this.name,
     required this.type,
     this.mintDate,
+    this.hasTime = false,
     this.quantity,
     this.twitterLink,
+    this.reminderEnabled = false,
+    this.reminderMinutes = 10,
     required this.createdAt,
   });
 
@@ -70,8 +103,11 @@ class WlEntry {
         'name': name,
         'type': type.name,
         'mintDate': mintDate?.toIso8601String(),
+        'hasTime': hasTime,
         'quantity': quantity,
         'twitterLink': twitterLink,
+        'reminderEnabled': reminderEnabled,
+        'reminderMinutes': reminderMinutes,
         'createdAt': createdAt.toIso8601String(),
       };
 
@@ -83,8 +119,11 @@ class WlEntry {
       mintDate: json['mintDate'] != null
           ? DateTime.tryParse(json['mintDate'] as String)
           : null,
+      hasTime: json['hasTime'] as bool? ?? false,
       quantity: json['quantity'] as int?,
       twitterLink: json['twitterLink'] as String?,
+      reminderEnabled: json['reminderEnabled'] as bool? ?? false,
+      reminderMinutes: json['reminderMinutes'] as int? ?? 10,
       createdAt: json['createdAt'] != null
           ? DateTime.tryParse(json['createdAt'] as String) ?? DateTime.now()
           : DateTime.now(),
@@ -99,6 +138,55 @@ const List<String> _monthNamesId = [
 
 String formatDate(DateTime d) {
   return '${d.day} ${_monthNamesId[d.month - 1]} ${d.year}';
+}
+
+String _twoDigits(int n) => n.toString().padLeft(2, '0');
+
+String formatDateTime(DateTime d, bool hasTime) {
+  final datePart = formatDate(d);
+  if (!hasTime) return datePart;
+  return '$datePart, ${_twoDigits(d.hour)}:${_twoDigits(d.minute)}';
+}
+
+/// Derives a stable 31-bit notification id from an entry's id so the same
+/// entry always maps to the same notification (needed to cancel/replace it).
+int notifIdFor(String entryId) => entryId.hashCode & 0x7FFFFFFF;
+
+Future<void> cancelReminder(String entryId) async {
+  await flutterLocalNotificationsPlugin.cancel(notifIdFor(entryId));
+}
+
+/// Cancels any existing reminder for this entry, then schedules a new one
+/// if the entry has a reminder enabled with a valid future fire time.
+Future<void> scheduleReminder(WlEntry entry) async {
+  await cancelReminder(entry.id);
+
+  if (!entry.reminderEnabled || entry.mintDate == null || !entry.hasTime) {
+    return;
+  }
+
+  final fireTime =
+      entry.mintDate!.subtract(Duration(minutes: entry.reminderMinutes));
+  if (fireTime.isBefore(DateTime.now())) return; // don't schedule the past
+
+  final tzTime = tz.TZDateTime.from(fireTime, tz.local);
+
+  await flutterLocalNotificationsPlugin.zonedSchedule(
+    notifIdFor(entry.id),
+    'Mint sebentar lagi! ðŸš€',
+    '${entry.name} (${entry.type.label}) mint dalam ${entry.reminderMinutes} menit',
+    tzTime,
+    const NotificationDetails(
+      android: AndroidNotificationDetails(
+        'mint_reminders',
+        'Pengingat Mint NFT',
+        channelDescription: 'Notifikasi pengingat sebelum waktu mint NFT',
+        importance: Importance.high,
+        priority: Priority.high,
+      ),
+    ),
+    androidScheduleMode: AndroidScheduleMode.exactAllowWhileIdle,
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -140,6 +228,12 @@ class _HomePageState extends State<HomePage> {
       _entries = loaded;
       _loading = false;
     });
+
+    // Defensive resync: make sure every entry's reminder is (re)scheduled,
+    // in case something changed since the app was last opened.
+    for (final e in loaded) {
+      await scheduleReminder(e);
+    }
   }
 
   Future<void> _save() async {
@@ -176,11 +270,18 @@ class _HomePageState extends State<HomePage> {
       }
     });
     _save();
+
+    if (result.deleted && entry != null) {
+      await cancelReminder(entry.id);
+    } else if (result.entry != null) {
+      await scheduleReminder(result.entry!);
+    }
   }
 
   Future<void> _delete(WlEntry entry) async {
     setState(() => _entries.removeWhere((e) => e.id == entry.id));
     await _save();
+    await cancelReminder(entry.id);
   }
 
   Future<void> _openTwitter(String link) async {
@@ -204,31 +305,58 @@ class _HomePageState extends State<HomePage> {
   @override
   Widget build(BuildContext context) {
     final list = _sorted;
+    final gtdCount = _entries.where((e) => e.type == WlType.gtd).length;
+    final fcfsCount = _entries.where((e) => e.type == WlType.fcfs).length;
     return Scaffold(
       appBar: AppBar(
         title: const Text('NFT WL Tracker',
             style: TextStyle(fontWeight: FontWeight.bold)),
       ),
-      body: _loading
-          ? const Center(child: CircularProgressIndicator())
-          : list.isEmpty
-              ? _buildEmpty()
-              : ListView.builder(
-                  padding: const EdgeInsets.fromLTRB(12, 12, 12, 88),
-                  itemCount: list.length,
-                  itemBuilder: (context, i) {
-                    final e = list[i];
-                    return _WlCard(
-                      entry: e,
-                      onTap: () => _openAddEdit(entry: e),
-                      onDelete: () => _delete(e),
-                      onTwitterTap: e.twitterLink != null &&
-                              e.twitterLink!.trim().isNotEmpty
-                          ? () => _openTwitter(e.twitterLink!)
-                          : null,
-                    );
-                  },
-                ),
+      body: Column(
+        children: [
+          if (_entries.isNotEmpty)
+            Padding(
+              padding: const EdgeInsets.fromLTRB(16, 12, 16, 0),
+              child: Row(
+                children: [
+                  _SummaryChip(
+                    label: 'GTD',
+                    count: gtdCount,
+                    color: WlType.gtd.color,
+                  ),
+                  const SizedBox(width: 10),
+                  _SummaryChip(
+                    label: 'FCFS',
+                    count: fcfsCount,
+                    color: WlType.fcfs.color,
+                  ),
+                ],
+              ),
+            ),
+          Expanded(
+            child: _loading
+                ? const Center(child: CircularProgressIndicator())
+                : list.isEmpty
+                    ? _buildEmpty()
+                    : ListView.builder(
+                        padding: const EdgeInsets.fromLTRB(12, 12, 12, 88),
+                        itemCount: list.length,
+                        itemBuilder: (context, i) {
+                          final e = list[i];
+                          return _WlCard(
+                            entry: e,
+                            onTap: () => _openAddEdit(entry: e),
+                            onDelete: () => _delete(e),
+                            onTwitterTap: e.twitterLink != null &&
+                                    e.twitterLink!.trim().isNotEmpty
+                                ? () => _openTwitter(e.twitterLink!)
+                                : null,
+                          );
+                        },
+                      ),
+          ),
+        ],
+      ),
       floatingActionButton: FloatingActionButton.extended(
         onPressed: () => _openAddEdit(),
         icon: const Icon(Icons.add),
@@ -256,6 +384,54 @@ class _HomePageState extends State<HomePage> {
               'Tap tombol "Tambah WL" untuk mulai mencatat whitelist NFT kamu.',
               textAlign: TextAlign.center,
               style: TextStyle(color: Colors.grey.shade400),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _SummaryChip extends StatelessWidget {
+  final String label;
+  final int count;
+  final Color color;
+
+  const _SummaryChip({
+    required this.label,
+    required this.count,
+    required this.color,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Expanded(
+      child: Container(
+        padding: const EdgeInsets.symmetric(vertical: 10, horizontal: 12),
+        decoration: BoxDecoration(
+          color: color.withOpacity(0.14),
+          borderRadius: BorderRadius.circular(12),
+          border: Border.all(color: color.withOpacity(0.4)),
+        ),
+        child: Row(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Text(
+              label,
+              style: TextStyle(
+                color: color,
+                fontWeight: FontWeight.bold,
+                fontSize: 13,
+              ),
+            ),
+            const SizedBox(width: 6),
+            Text(
+              '= $count',
+              style: TextStyle(
+                color: color,
+                fontWeight: FontWeight.bold,
+                fontSize: 13,
+              ),
             ),
           ],
         ),
@@ -383,7 +559,8 @@ class _WlCard extends StatelessWidget {
                       const SizedBox(width: 4),
                       Text(
                         date != null
-                            ? formatDate(date) + (isPast ? ' (lewat)' : '')
+                            ? formatDateTime(date, entry.hasTime) +
+                                (isPast ? ' (lewat)' : '')
                             : 'Tanggal belum ditentukan',
                         style: TextStyle(
                           fontSize: 12.5,
@@ -414,9 +591,8 @@ class _WlCard extends StatelessWidget {
                       child: Row(
                         mainAxisSize: MainAxisSize.min,
                         children: [
-                          const Icon(Icons.alternate_email,
-                              size: 14, color: Color(0xFF1DA1F2)),
-                          const SizedBox(width: 4),
+                          const Text('ðŸ¦', style: TextStyle(fontSize: 14)),
+                          const SizedBox(width: 5),
                           Flexible(
                             child: Text(
                               entry.twitterLink!,
@@ -431,6 +607,23 @@ class _WlCard extends StatelessWidget {
                           ),
                         ],
                       ),
+                    ),
+                  ],
+                  if (entry.reminderEnabled &&
+                      entry.hasTime &&
+                      date != null &&
+                      !isPast) ...[
+                    const SizedBox(height: 6),
+                    Row(
+                      children: [
+                        const Text('ðŸ””', style: TextStyle(fontSize: 12)),
+                        const SizedBox(width: 4),
+                        Text(
+                          'Diingatkan ${entry.reminderMinutes} menit sebelum mint',
+                          style: TextStyle(
+                              fontSize: 11.5, color: Colors.grey.shade500),
+                        ),
+                      ],
                     ),
                   ],
                 ],
@@ -468,6 +661,9 @@ class _AddEditPageState extends State<AddEditPage> {
   late TextEditingController _twitterCtrl;
   WlType _type = WlType.gtd;
   DateTime? _mintDate;
+  TimeOfDay? _mintTime;
+  bool _reminderEnabled = false;
+  int _reminderMinutes = 10;
 
   bool get _isEditing => widget.entry != null;
 
@@ -481,6 +677,11 @@ class _AddEditPageState extends State<AddEditPage> {
     _twitterCtrl = TextEditingController(text: e?.twitterLink ?? '');
     _type = e?.type ?? WlType.gtd;
     _mintDate = e?.mintDate;
+    if (e != null && e.hasTime && e.mintDate != null) {
+      _mintTime = TimeOfDay(hour: e.mintDate!.hour, minute: e.mintDate!.minute);
+    }
+    _reminderEnabled = e?.reminderEnabled ?? false;
+    _reminderMinutes = e?.reminderMinutes ?? 10;
   }
 
   @override
@@ -510,20 +711,57 @@ class _AddEditPageState extends State<AddEditPage> {
     if (picked != null) setState(() => _mintDate = picked);
   }
 
+  Future<void> _pickTime() async {
+    if (_mintDate == null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Pilih tanggal mint dulu ya')),
+      );
+      return;
+    }
+    final picked = await showTimePicker(
+      context: context,
+      initialTime: _mintTime ?? TimeOfDay.now(),
+      builder: (ctx, child) => Theme(
+        data: Theme.of(ctx).copyWith(
+          colorScheme: Theme.of(ctx).colorScheme.copyWith(
+                primary: const Color(0xFF9B5DE5),
+              ),
+        ),
+        child: child!,
+      ),
+    );
+    if (picked != null) setState(() => _mintTime = picked);
+  }
+
   void _save() {
     if (!_formKey.currentState!.validate()) return;
 
     final quantityText = _quantityCtrl.text.trim();
     final twitterText = _twitterCtrl.text.trim();
 
+    DateTime? combinedDate = _mintDate;
+    final hasTime = _mintDate != null && _mintTime != null;
+    if (hasTime) {
+      combinedDate = DateTime(
+        _mintDate!.year,
+        _mintDate!.month,
+        _mintDate!.day,
+        _mintTime!.hour,
+        _mintTime!.minute,
+      );
+    }
+
     final entry = WlEntry(
       id: widget.entry?.id ??
           DateTime.now().millisecondsSinceEpoch.toString(),
       name: _nameCtrl.text.trim(),
       type: _type,
-      mintDate: _mintDate,
+      mintDate: combinedDate,
+      hasTime: hasTime,
       quantity: quantityText.isEmpty ? null : int.tryParse(quantityText),
       twitterLink: twitterText.isEmpty ? null : twitterText,
+      reminderEnabled: _reminderEnabled && hasTime,
+      reminderMinutes: _reminderMinutes,
       createdAt: widget.entry?.createdAt ?? DateTime.now(),
     );
 
@@ -630,7 +868,10 @@ class _AddEditPageState extends State<AddEditPage> {
                     ),
                     if (_mintDate != null)
                       IconButton(
-                        onPressed: () => setState(() => _mintDate = null),
+                        onPressed: () => setState(() {
+                          _mintDate = null;
+                          _mintTime = null;
+                        }),
                         icon: const Icon(Icons.close, size: 18),
                         color: Colors.grey,
                       ),
@@ -638,6 +879,104 @@ class _AddEditPageState extends State<AddEditPage> {
                 ),
               ),
             ),
+            const SizedBox(height: 14),
+            const Text('Jam Mint (opsional)',
+                style: TextStyle(color: Colors.grey, fontSize: 13)),
+            const SizedBox(height: 8),
+            InkWell(
+              onTap: _pickTime,
+              borderRadius: BorderRadius.circular(12),
+              child: Container(
+                width: double.infinity,
+                padding:
+                    const EdgeInsets.symmetric(vertical: 14, horizontal: 14),
+                decoration: BoxDecoration(
+                  color: const Color(0xFF161222),
+                  borderRadius: BorderRadius.circular(12),
+                ),
+                child: Row(
+                  children: [
+                    const Icon(Icons.access_time,
+                        size: 18, color: Color(0xFF9B5DE5)),
+                    const SizedBox(width: 10),
+                    Expanded(
+                      child: Text(
+                        _mintTime != null
+                            ? '${_twoDigits(_mintTime!.hour)}:${_twoDigits(_mintTime!.minute)}'
+                            : 'Belum tau jamnya',
+                        style: TextStyle(
+                          fontSize: 15,
+                          color: _mintTime != null
+                              ? Colors.white
+                              : Colors.grey.shade500,
+                        ),
+                      ),
+                    ),
+                    if (_mintTime != null)
+                      IconButton(
+                        onPressed: () => setState(() => _mintTime = null),
+                        icon: const Icon(Icons.close, size: 18),
+                        color: Colors.grey,
+                      ),
+                  ],
+                ),
+              ),
+            ),
+            if (_mintDate != null && _mintTime != null) ...[
+              const SizedBox(height: 20),
+              const Text('Notifikasi Pengingat',
+                  style: TextStyle(color: Colors.grey, fontSize: 13)),
+              const SizedBox(height: 8),
+              Container(
+                padding: const EdgeInsets.all(14),
+                decoration: BoxDecoration(
+                  color: const Color(0xFF161222),
+                  borderRadius: BorderRadius.circular(12),
+                ),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Row(
+                      children: [
+                        const Expanded(
+                          child: Text(
+                            'Ingatkan sebelum mint',
+                            style: TextStyle(fontSize: 14.5),
+                          ),
+                        ),
+                        Switch(
+                          value: _reminderEnabled,
+                          activeColor: const Color(0xFF9B5DE5),
+                          onChanged: (v) =>
+                              setState(() => _reminderEnabled = v),
+                        ),
+                      ],
+                    ),
+                    if (_reminderEnabled) ...[
+                      const SizedBox(height: 4),
+                      Text(
+                        '$_reminderMinutes menit sebelum waktu mint',
+                        style: const TextStyle(
+                          color: Color(0xFF9B5DE5),
+                          fontWeight: FontWeight.w600,
+                          fontSize: 13.5,
+                        ),
+                      ),
+                      Slider(
+                        value: _reminderMinutes.toDouble(),
+                        min: 1,
+                        max: 10,
+                        divisions: 9,
+                        activeColor: const Color(0xFF9B5DE5),
+                        label: '$_reminderMinutes menit',
+                        onChanged: (v) =>
+                            setState(() => _reminderMinutes = v.round()),
+                      ),
+                    ],
+                  ],
+                ),
+              ),
+            ],
             const SizedBox(height: 20),
             const Text('Jumlah (opsional)',
                 style: TextStyle(color: Colors.grey, fontSize: 13)),
