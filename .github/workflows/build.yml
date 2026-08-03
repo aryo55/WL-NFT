@@ -42,6 +42,10 @@ jobs:
         run: |
           sed -i 's|<application|<queries><intent><action android:name="android.intent.action.VIEW" /><category android:name="android.intent.category.BROWSABLE" /><data android:scheme="https" /></intent></queries><application|' android/app/src/main/AndroidManifest.xml
 
+      - name: Set app display name
+        run: |
+          sed -i 's|android:label="nft_wl_tracker"|android:label="Jadwal Mint NFT"|' android/app/src/main/AndroidManifest.xml
+
       - name: Generate launcher icon
         run: dart run flutter_launcher_icons
 
