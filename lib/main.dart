@@ -26,19 +26,11 @@ Future<void> main() async {
   const initSettings = InitializationSettings(android: androidInit);
   await flutterLocalNotificationsPlugin.initialize(initSettings);
 
-  final androidImpl = flutterLocalNotificationsPlugin
-      .resolvePlatformSpecificImplementation<
-          AndroidFlutterLocalNotificationsPlugin>();
-
-  final notifGranted = await androidImpl?.requestNotificationsPermission();
-  debugPrint('NOTIF PERMISSION GRANTED: $notifGranted');
-
-  // Wajib diminta terpisah dari izin notifikasi biasa. Tanpa ini,
-  // zonedSchedule dengan AndroidScheduleMode.exactAllowWhileIdle akan
-  // gagal/di-downgrade diam-diam di Android 12+ (termasuk semua HP
-  // berbasis OriginOS/FuntouchOS/MIUI/ColorOS).
-  final exactGranted = await androidImpl?.requestExactAlarmsPermission();
-  debugPrint('EXACT ALARM PERMISSION GRANTED: $exactGranted');
+  // PENTING: permission request (notifikasi biasa & exact alarm) SENGAJA
+  // TIDAK dipanggil di sini. Kalau dipanggil sebelum runApp(), Activity
+  // Android belum tentu siap nerima intent ke System Settings, jadi
+  // requestExactAlarmsPermission() bisa gagal diam-diam tanpa error.
+  // Diminta di HomePage.initState() setelah frame pertama selesai render.
 
   runApp(const NftWlTrackerApp());
 }
@@ -229,6 +221,27 @@ class _HomePageState extends State<HomePage> {
   void initState() {
     super.initState();
     _load();
+    // Diminta SETELAH frame pertama selesai render, bukan di main() sebelum
+    // runApp(). Ini penting: kalau diminta terlalu awal, intent ke System
+    // Settings (buat exact alarm) bisa gagal diam-diam karena Activity-nya
+    // belum sepenuhnya siap.
+    WidgetsBinding.instance.addPostFrameCallback((_) => _requestPermissions());
+  }
+
+  Future<void> _requestPermissions() async {
+    final androidImpl = flutterLocalNotificationsPlugin
+        .resolvePlatformSpecificImplementation<
+            AndroidFlutterLocalNotificationsPlugin>();
+
+    final notifGranted = await androidImpl?.requestNotificationsPermission();
+    debugPrint('NOTIF PERMISSION GRANTED: $notifGranted');
+
+    // Wajib diminta terpisah dari izin notifikasi biasa. Tanpa ini,
+    // zonedSchedule dengan AndroidScheduleMode.exactAllowWhileIdle akan
+    // gagal/di-downgrade diam-diam di Android 12+ (termasuk semua HP
+    // berbasis OriginOS/FuntouchOS/MIUI/ColorOS).
+    final exactGranted = await androidImpl?.requestExactAlarmsPermission();
+    debugPrint('EXACT ALARM PERMISSION GRANTED: $exactGranted');
   }
 
   Future<void> _load() async {
