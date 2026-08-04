@@ -367,6 +367,53 @@ class _HomePageState extends State<HomePage> {
               );
             },
           ),
+          // TODO: hapus tombol ini juga setelah selesai debug. Nampilin
+          // status izin langsung di layar, gak perlu ADB/laptop.
+          IconButton(
+            tooltip: 'Cek Izin',
+            icon: const Icon(Icons.bug_report_outlined),
+            onPressed: () async {
+              final androidImpl = flutterLocalNotificationsPlugin
+                  .resolvePlatformSpecificImplementation<
+                      AndroidFlutterLocalNotificationsPlugin>();
+
+              final notifEnabled =
+                  await androidImpl?.areNotificationsEnabled();
+              final exactAllowed =
+                  await androidImpl?.canScheduleExactNotifications();
+              final now = DateTime.now();
+              final tzNow = tz.TZDateTime.now(tz.local);
+
+              if (!context.mounted) return;
+              showDialog(
+                context: context,
+                builder: (_) => AlertDialog(
+                  title: const Text('Status Izin & Waktu'),
+                  content: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text('Izin notifikasi: ${notifEnabled ?? "null (error)"}'),
+                      const SizedBox(height: 6),
+                      Text('Izin exact alarm: ${exactAllowed ?? "null (error)"}'),
+                      const SizedBox(height: 6),
+                      Text('Waktu device (lokal): $now'),
+                      const SizedBox(height: 6),
+                      Text('Waktu tz.local: $tzNow'),
+                      const SizedBox(height: 6),
+                      Text('Zona waktu terdeteksi: ${tz.local.name}'),
+                    ],
+                  ),
+                  actions: [
+                    TextButton(
+                      onPressed: () => Navigator.pop(context),
+                      child: const Text('Tutup'),
+                    ),
+                  ],
+                ),
+              );
+            },
+          ),
         ],
       ),
       body: Column(
