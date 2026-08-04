@@ -4,6 +4,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:url_launcher/url_launcher.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:flutter_timezone/flutter_timezone.dart';
+import 'package:permission_handler/permission_handler.dart' as ph;
 import 'package:timezone/data/latest.dart' as tz;
 import 'package:timezone/timezone.dart' as tz;
 
@@ -242,6 +243,19 @@ class _HomePageState extends State<HomePage> {
     // berbasis OriginOS/FuntouchOS/MIUI/ColorOS).
     final exactGranted = await androidImpl?.requestExactAlarmsPermission();
     debugPrint('EXACT ALARM PERMISSION GRANTED: $exactGranted');
+
+    // Ini yang sering kelewat: cuma nyalain "No restriction" manual di
+    // Settings OEM (vivo/iQOO/Xiaomi/dll) SERING gak cukup, karena itu
+    // toggle custom OEM sendiri, bukan API resmi Android. Minta lewat
+    // dialog sistem resmi ini jauh lebih dihormati sama battery manager
+    // OEM dibanding toggle manual, dan ini yang dipakai app-app kayak
+    // aplikasi tabungan/alarm yang reminder-nya reliable.
+    final batteryStatus = await ph.Permission.ignoreBatteryOptimizations.status;
+    debugPrint('BATTERY OPT IGNORED (before): $batteryStatus');
+    if (!batteryStatus.isGranted) {
+      final result = await ph.Permission.ignoreBatteryOptimizations.request();
+      debugPrint('BATTERY OPT IGNORED (after request): $result');
+    }
   }
 
   Future<void> _load() async {
@@ -394,6 +408,8 @@ class _HomePageState extends State<HomePage> {
                   await androidImpl?.areNotificationsEnabled();
               final exactAllowed =
                   await androidImpl?.canScheduleExactNotifications();
+              final batteryIgnored =
+                  await ph.Permission.ignoreBatteryOptimizations.status;
               final now = DateTime.now();
               final tzNow = tz.TZDateTime.now(tz.local);
 
@@ -410,6 +426,8 @@ class _HomePageState extends State<HomePage> {
                       const SizedBox(height: 6),
                       Text('Izin exact alarm: ${exactAllowed ?? "null (error)"}'),
                       const SizedBox(height: 6),
+                      Text('Battery opt diabaikan: ${batteryIgnored.isGranted}'),
+                      const SizedBox(height: 6),
                       Text('Waktu device (lokal): $now'),
                       const SizedBox(height: 6),
                       Text('Waktu tz.local: $tzNow'),
@@ -418,6 +436,14 @@ class _HomePageState extends State<HomePage> {
                     ],
                   ),
                   actions: [
+                    TextButton(
+                      onPressed: () async {
+                        Navigator.pop(context);
+                        await ph.Permission.ignoreBatteryOptimizations
+                            .request();
+                      },
+                      child: const Text('Minta Izin Battery'),
+                    ),
                     TextButton(
                       onPressed: () => Navigator.pop(context),
                       child: const Text('Tutup'),
