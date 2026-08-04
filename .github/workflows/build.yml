@@ -40,16 +40,99 @@ jobs:
 
       - name: Allow opening browser links (Android 11+ package visibility)
         run: |
-          sed -i 's|<application|<queries><intent><action android:name="android.intent.action.VIEW" /><category android:name="android.intent.category.BROWSABLE" /><data android:scheme="https" /></intent></queries><application|' android/app/src/main/AndroidManifest.xml
+          python3 - << 'EOF'
+          import re
+          path = "android/app/src/main/AndroidManifest.xml"
+          with open(path, "r", encoding="utf-8") as f:
+              content = f.read()
+
+          queries_block = (
+              '<queries><intent><action android:name="android.intent.action.VIEW" />'
+              '<category android:name="android.intent.category.BROWSABLE" />'
+              '<data android:scheme="https" /></intent></queries>'
+          )
+
+          if "android.intent.category.BROWSABLE" not in content:
+              # Insert right before the <application ...> tag, regardless of
+              # whitespace/newlines/attribute formatting around it.
+              new_content, count = re.subn(r"<application", queries_block + "<application", content, count=1)
+              if count == 0:
+                  raise SystemExit("ERROR: could not find <application tag to insert queries block")
+              content = new_content
+
+          with open(path, "w", encoding="utf-8") as f:
+              f.write(content)
+          print("Queries block OK.")
+          EOF
 
       - name: Set app display name
         run: |
-          sed -i 's|android:label="nft_wl_tracker"|android:label="Jadwal Mint NFT"|' android/app/src/main/AndroidManifest.xml
+          python3 - << 'EOF'
+          import re
+          path = "android/app/src/main/AndroidManifest.xml"
+          with open(path, "r", encoding="utf-8") as f:
+              content = f.read()
+
+          new_content, count = re.subn(
+              r'android:label="[^"]*"',
+              'android:label="Jadwal Mint NFT"',
+              content,
+              count=1,
+          )
+          if count == 0:
+              raise SystemExit("ERROR: could not find android:label attribute to replace")
+
+          with open(path, "w", encoding="utf-8") as f:
+              f.write(new_content)
+          print("App label OK.")
+          EOF
 
       - name: Add notification permissions & receivers
         run: |
-          sed -i 's|<manifest xmlns:android="http://schemas.android.com/apk/res/android">|<manifest xmlns:android="http://schemas.android.com/apk/res/android"><uses-permission android:name="android.permission.POST_NOTIFICATIONS"/><uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM"/><uses-permission android:name="android.permission.USE_EXACT_ALARM"/><uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED"/>|' android/app/src/main/AndroidManifest.xml
-          sed -i 's|</application>|<receiver android:exported="false" android:name="com.dexterous.flutterlocalnotifications.ScheduledNotificationReceiver" /><receiver android:exported="false" android:name="com.dexterous.flutterlocalnotifications.ScheduledNotificationBootReceiver"><intent-filter><action android:name="android.intent.action.BOOT_COMPLETED"/><action android:name="android.intent.action.MY_PACKAGE_REPLACED"/><action android:name="android.intent.action.QUICKBOOT_POWERON" /><action android:name="com.htc.intent.action.QUICKBOOT_POWERON"/></intent-filter></receiver></application>|' android/app/src/main/AndroidManifest.xml
+          python3 - << 'EOF'
+          import re
+          path = "android/app/src/main/AndroidManifest.xml"
+          with open(path, "r", encoding="utf-8") as f:
+              content = f.read()
+
+          permissions = (
+              '<uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>'
+              '<uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM"/>'
+              '<uses-permission android:name="android.permission.USE_EXACT_ALARM"/>'
+              '<uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED"/>'
+          )
+          receivers = (
+              '<receiver android:exported="false" '
+              'android:name="com.dexterous.flutterlocalnotifications.ScheduledNotificationReceiver" />'
+              '<receiver android:exported="false" '
+              'android:name="com.dexterous.flutterlocalnotifications.ScheduledNotificationBootReceiver">'
+              '<intent-filter>'
+              '<action android:name="android.intent.action.BOOT_COMPLETED"/>'
+              '<action android:name="android.intent.action.MY_PACKAGE_REPLACED"/>'
+              '<action android:name="android.intent.action.QUICKBOOT_POWERON" />'
+              '<action android:name="com.htc.intent.action.QUICKBOOT_POWERON"/>'
+              '</intent-filter></receiver>'
+          )
+
+          # Insert permissions right after the opening <manifest ...> tag,
+          # no matter what attributes/whitespace it has.
+          if "SCHEDULE_EXACT_ALARM" not in content:
+              new_content, count = re.subn(r"(<manifest\b[^>]*>)", r"\1" + permissions, content, count=1)
+              if count == 0:
+                  raise SystemExit("ERROR: could not find <manifest ...> opening tag")
+              content = new_content
+
+          # Insert receivers right before the LAST </application> closing tag.
+          if "ScheduledNotificationBootReceiver" not in content:
+              idx = content.rfind("</application>")
+              if idx == -1:
+                  raise SystemExit("ERROR: could not find </application> closing tag")
+              content = content[:idx] + receivers + content[idx:]
+
+          with open(path, "w", encoding="utf-8") as f:
+              f.write(content)
+          print("Permissions & receivers OK.")
+          EOF
 
       - name: Verify manifest edits actually landed (fail loud, not silent)
         run: |
@@ -57,11 +140,11 @@ jobs:
           cat android/app/src/main/AndroidManifest.xml
           echo "=================================="
           grep -q "SCHEDULE_EXACT_ALARM" android/app/src/main/AndroidManifest.xml || \
-            (echo "::error::SCHEDULE_EXACT_ALARM permission NOT found in manifest after sed! sed pattern probably didn't match the generated template. Build stopped." && exit 1)
+            (echo "::error::SCHEDULE_EXACT_ALARM permission NOT found in manifest!" && exit 1)
           grep -q "POST_NOTIFICATIONS" android/app/src/main/AndroidManifest.xml || \
-            (echo "::error::POST_NOTIFICATIONS permission NOT found in manifest after sed!" && exit 1)
+            (echo "::error::POST_NOTIFICATIONS permission NOT found in manifest!" && exit 1)
           grep -q "ScheduledNotificationBootReceiver" android/app/src/main/AndroidManifest.xml || \
-            (echo "::error::Notification receivers NOT found in manifest after sed!" && exit 1)
+            (echo "::error::Notification receivers NOT found in manifest!" && exit 1)
           echo "All required permissions & receivers confirmed present in manifest."
 
       - name: Enable core library desugaring (required by flutter_local_notifications)
