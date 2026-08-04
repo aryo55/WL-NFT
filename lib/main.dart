@@ -196,7 +196,11 @@ Future<ScheduleResult> scheduleReminder(WlEntry entry) async {
         priority: Priority.high,
       ),
     ),
-    androidScheduleMode: AndroidScheduleMode.exactAllowWhileIdle,
+    // alarmClock = prioritas TERTINGGI yang Android punya buat alarm,
+    // sama kayak yang dipakai app Jam/Alarm asli. Nembus Doze mode total
+    // dan JAUH lebih dihormati sama battery manager OEM (vivo/iQOO/Xiaomi)
+    // dibanding exactAllowWhileIdle biasa.
+    androidScheduleMode: AndroidScheduleMode.alarmClock,
     uiLocalNotificationDateInterpretation:
         UILocalNotificationDateInterpretation.absoluteTime,
   );
@@ -477,7 +481,7 @@ class _HomePageState extends State<HomePage> {
                     priority: Priority.high,
                   ),
                 ),
-                androidScheduleMode: AndroidScheduleMode.exactAllowWhileIdle,
+                androidScheduleMode: AndroidScheduleMode.alarmClock,
                 uiLocalNotificationDateInterpretation:
                     UILocalNotificationDateInterpretation.absoluteTime,
               );
