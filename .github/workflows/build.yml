@@ -100,6 +100,7 @@ jobs:
               '<uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM"/>'
               '<uses-permission android:name="android.permission.USE_EXACT_ALARM"/>'
               '<uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED"/>'
+              '<uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS"/>'
           )
           receivers = (
               '<receiver android:exported="false" '
@@ -145,6 +146,8 @@ jobs:
             (echo "::error::POST_NOTIFICATIONS permission NOT found in manifest!" && exit 1)
           grep -q "ScheduledNotificationBootReceiver" android/app/src/main/AndroidManifest.xml || \
             (echo "::error::Notification receivers NOT found in manifest!" && exit 1)
+          grep -q "REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" android/app/src/main/AndroidManifest.xml || \
+            (echo "::error::REQUEST_IGNORE_BATTERY_OPTIMIZATIONS permission NOT found in manifest!" && exit 1)
           echo "All required permissions & receivers confirmed present in manifest."
 
       - name: Enable core library desugaring (required by flutter_local_notifications)
