@@ -51,6 +51,19 @@ jobs:
           sed -i 's|<manifest xmlns:android="http://schemas.android.com/apk/res/android">|<manifest xmlns:android="http://schemas.android.com/apk/res/android"><uses-permission android:name="android.permission.POST_NOTIFICATIONS"/><uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM"/><uses-permission android:name="android.permission.USE_EXACT_ALARM"/><uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED"/>|' android/app/src/main/AndroidManifest.xml
           sed -i 's|</application>|<receiver android:exported="false" android:name="com.dexterous.flutterlocalnotifications.ScheduledNotificationReceiver" /><receiver android:exported="false" android:name="com.dexterous.flutterlocalnotifications.ScheduledNotificationBootReceiver"><intent-filter><action android:name="android.intent.action.BOOT_COMPLETED"/><action android:name="android.intent.action.MY_PACKAGE_REPLACED"/><action android:name="android.intent.action.QUICKBOOT_POWERON" /><action android:name="com.htc.intent.action.QUICKBOOT_POWERON"/></intent-filter></receiver></application>|' android/app/src/main/AndroidManifest.xml
 
+      - name: Verify manifest edits actually landed (fail loud, not silent)
+        run: |
+          echo "===== FULL MANIFEST CONTENT ====="
+          cat android/app/src/main/AndroidManifest.xml
+          echo "=================================="
+          grep -q "SCHEDULE_EXACT_ALARM" android/app/src/main/AndroidManifest.xml || \
+            (echo "::error::SCHEDULE_EXACT_ALARM permission NOT found in manifest after sed! sed pattern probably didn't match the generated template. Build stopped." && exit 1)
+          grep -q "POST_NOTIFICATIONS" android/app/src/main/AndroidManifest.xml || \
+            (echo "::error::POST_NOTIFICATIONS permission NOT found in manifest after sed!" && exit 1)
+          grep -q "ScheduledNotificationBootReceiver" android/app/src/main/AndroidManifest.xml || \
+            (echo "::error::Notification receivers NOT found in manifest after sed!" && exit 1)
+          echo "All required permissions & receivers confirmed present in manifest."
+
       - name: Enable core library desugaring (required by flutter_local_notifications)
         run: |
           grep -q "isCoreLibraryDesugaringEnabled" android/app/build.gradle.kts || \
