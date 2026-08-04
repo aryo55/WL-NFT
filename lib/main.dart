@@ -427,6 +427,44 @@ class _HomePageState extends State<HomePage> {
               );
             },
           ),
+          // TODO: hapus tombol ini juga setelah selesai debug. Nge-tes
+          // jalur zonedSchedule yang PERSIS sama kayak reminder beneran,
+          // tapi 15 detik dari sekarang, biar cepet ketauan exact alarm
+          // delivery-nya jalan atau enggak, terlepas dari logic tanggal
+          // di form Add/Edit WL.
+          IconButton(
+            tooltip: 'Test Terjadwal 15 detik',
+            icon: const Icon(Icons.timer_outlined),
+            onPressed: () async {
+              final fireAt =
+                  tz.TZDateTime.now(tz.local).add(const Duration(seconds: 15));
+              await flutterLocalNotificationsPlugin.zonedSchedule(
+                999998,
+                'Test Terjadwal',
+                'Kalau ini muncul ~15 detik setelah kamu pencet tombol, zonedSchedule OK.',
+                fireAt,
+                const NotificationDetails(
+                  android: AndroidNotificationDetails(
+                    'mint_reminders',
+                    'Pengingat Mint NFT',
+                    importance: Importance.high,
+                    priority: Priority.high,
+                  ),
+                ),
+                androidScheduleMode: AndroidScheduleMode.exactAllowWhileIdle,
+                uiLocalNotificationDateInterpretation:
+                    UILocalNotificationDateInterpretation.absoluteTime,
+              );
+              if (!context.mounted) return;
+              ScaffoldMessenger.of(context).showSnackBar(
+                SnackBar(
+                  content: Text(
+                      'Dijadwalkan buat $fireAt. Minimize app (jangan force-close), tunggu 15 detik.'),
+                  duration: const Duration(seconds: 4),
+                ),
+              );
+            },
+          ),
         ],
       ),
       body: Column(
