@@ -19,7 +19,7 @@ Future<void> main() async {
     tz.setLocalLocation(tz.getLocation(currentTimeZone.identifier));
   } catch (_) {
     // If detection fails, notifications still work but may use device's
-    // default (UTC) reference ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â reminder time could be off in that case.
+    // default (UTC) reference â€” reminder time could be off in that case.
   }
 
   const androidInit = AndroidInitializationSettings('@mipmap/ic_launcher');
@@ -29,7 +29,16 @@ Future<void> main() async {
   final androidImpl = flutterLocalNotificationsPlugin
       .resolvePlatformSpecificImplementation<
           AndroidFlutterLocalNotificationsPlugin>();
-  await androidImpl?.requestNotificationsPermission();
+
+  final notifGranted = await androidImpl?.requestNotificationsPermission();
+  debugPrint('NOTIF PERMISSION GRANTED: $notifGranted');
+
+  // Wajib diminta terpisah dari izin notifikasi biasa. Tanpa ini,
+  // zonedSchedule dengan AndroidScheduleMode.exactAllowWhileIdle akan
+  // gagal/di-downgrade diam-diam di Android 12+ (termasuk semua HP
+  // berbasis OriginOS/FuntouchOS/MIUI/ColorOS).
+  final exactGranted = await androidImpl?.requestExactAlarmsPermission();
+  debugPrint('EXACT ALARM PERMISSION GRANTED: $exactGranted');
 
   runApp(const NftWlTrackerApp());
 }
@@ -156,24 +165,33 @@ Future<void> cancelReminder(String entryId) async {
   await flutterLocalNotificationsPlugin.cancel(notifIdFor(entryId));
 }
 
+/// Result of trying to schedule a reminder, so the UI can tell the user
+/// exactly why nothing was scheduled instead of failing silently.
+enum ScheduleResult { scheduled, notEnabled, timeAlreadyPast }
+
 /// Cancels any existing reminder for this entry, then schedules a new one
 /// if the entry has a reminder enabled with a valid future fire time.
-Future<void> scheduleReminder(WlEntry entry) async {
+Future<ScheduleResult> scheduleReminder(WlEntry entry) async {
   await cancelReminder(entry.id);
 
   if (!entry.reminderEnabled || entry.mintDate == null || !entry.hasTime) {
-    return;
+    return ScheduleResult.notEnabled;
   }
 
   final fireTime =
       entry.mintDate!.subtract(Duration(minutes: entry.reminderMinutes));
-  if (fireTime.isBefore(DateTime.now())) return; // don't schedule the past
+  if (fireTime.isBefore(DateTime.now())) {
+    debugPrint(
+        'SKIP SCHEDULE: fireTime $fireTime already before now ${DateTime.now()}');
+    return ScheduleResult.timeAlreadyPast; // don't schedule the past
+  }
 
   final tzTime = tz.TZDateTime.from(fireTime, tz.local);
+  debugPrint('SCHEDULING notif id=${notifIdFor(entry.id)} at $tzTime');
 
   await flutterLocalNotificationsPlugin.zonedSchedule(
     notifIdFor(entry.id),
-    'Mint sebentar lagi! ÃƒÂ°Ã…Â¸Ã…Â¡Ã¢â€šÂ¬',
+    'Mint sebentar lagi! ðŸš¨',
     '${entry.name} (${entry.type.label}) mint dalam ${entry.reminderMinutes} menit',
     tzTime,
     const NotificationDetails(
@@ -189,6 +207,7 @@ Future<void> scheduleReminder(WlEntry entry) async {
     uiLocalNotificationDateInterpretation:
         UILocalNotificationDateInterpretation.absoluteTime,
   );
+  return ScheduleResult.scheduled;
 }
 
 // ---------------------------------------------------------------------------
@@ -234,7 +253,7 @@ class _HomePageState extends State<HomePage> {
     // Defensive resync: make sure every entry's reminder is (re)scheduled,
     // in case something changed since the app was last opened.
     for (final e in loaded) {
-      await scheduleReminder(e);
+      await scheduleReminder(e); // ScheduleResult ignored here on purpose
     }
   }
 
@@ -276,7 +295,18 @@ class _HomePageState extends State<HomePage> {
     if (result.deleted && entry != null) {
       await cancelReminder(entry.id);
     } else if (result.entry != null) {
-      await scheduleReminder(result.entry!);
+      final scheduleResult = await scheduleReminder(result.entry!);
+      if (scheduleResult == ScheduleResult.timeAlreadyPast && mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text(
+              'Waktu reminder sudah lewat, notifikasi tidak dijadwalkan. '
+              'Coba pilih waktu mint yang lebih jauh dari sekarang.',
+            ),
+            duration: Duration(seconds: 4),
+          ),
+        );
+      }
     }
   }
 
@@ -313,6 +343,31 @@ class _HomePageState extends State<HomePage> {
       appBar: AppBar(
         title: const Text('NFT WL Tracker',
             style: TextStyle(fontWeight: FontWeight.bold)),
+        actions: [
+          // TODO: hapus tombol ini setelah notifikasi dikonfirmasi jalan.
+          // Menekannya harus langsung menampilkan notifikasi (tanpa
+          // menunggu jadwal), untuk memisahkan masalah "notif dasar
+          // gak jalan" dari masalah "scheduling/exact alarm gak jalan".
+          IconButton(
+            tooltip: 'Test Notif',
+            icon: const Icon(Icons.notifications_active_outlined),
+            onPressed: () async {
+              await flutterLocalNotificationsPlugin.show(
+                999999,
+                'Test Notifikasi',
+                'Kalau ini muncul, notifikasi dasar sudah OK.',
+                const NotificationDetails(
+                  android: AndroidNotificationDetails(
+                    'mint_reminders',
+                    'Pengingat Mint NFT',
+                    importance: Importance.high,
+                    priority: Priority.high,
+                  ),
+                ),
+              );
+            },
+          ),
+        ],
       ),
       body: Column(
         children: [
@@ -593,7 +648,7 @@ class _WlCard extends StatelessWidget {
                       child: Row(
                         mainAxisSize: MainAxisSize.min,
                         children: [
-                          const Text('ÃƒÂ°Ã…Â¸Ã‚ÂÃ‚Â¦', style: TextStyle(fontSize: 14)),
+                          const Text('ðŸ”—', style: TextStyle(fontSize: 14)),
                           const SizedBox(width: 5),
                           Flexible(
                             child: Text(
@@ -618,7 +673,7 @@ class _WlCard extends StatelessWidget {
                     const SizedBox(height: 6),
                     Row(
                       children: [
-                        const Text('ÃƒÂ°Ã…Â¸Ã¢â‚¬ÂÃ¢â‚¬Â', style: TextStyle(fontSize: 12)),
+                        const Text('ðŸ””', style: TextStyle(fontSize: 12)),
                         const SizedBox(width: 4),
                         Text(
                           'Diingatkan ${entry.reminderMinutes} menit sebelum mint',
