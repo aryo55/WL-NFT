@@ -2,37 +2,9 @@ import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:url_launcher/url_launcher.dart';
-import 'package:flutter_local_notifications/flutter_local_notifications.dart';
-import 'package:flutter_timezone/flutter_timezone.dart';
-import 'package:permission_handler/permission_handler.dart' as ph;
-import 'package:timezone/data/latest.dart' as tz;
-import 'package:timezone/timezone.dart' as tz;
-
-final FlutterLocalNotificationsPlugin flutterLocalNotificationsPlugin =
-    FlutterLocalNotificationsPlugin();
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
-
-  tz.initializeTimeZones();
-  try {
-    final currentTimeZone = await FlutterTimezone.getLocalTimezone();
-    tz.setLocalLocation(tz.getLocation(currentTimeZone.identifier));
-  } catch (_) {
-    // If detection fails, notifications still work but may use device's
-    // default (UTC) reference â€” reminder time could be off in that case.
-  }
-
-  const androidInit = AndroidInitializationSettings('@mipmap/ic_launcher');
-  const initSettings = InitializationSettings(android: androidInit);
-  await flutterLocalNotificationsPlugin.initialize(initSettings);
-
-  // PENTING: permission request (notifikasi biasa & exact alarm) SENGAJA
-  // TIDAK dipanggil di sini. Kalau dipanggil sebelum runApp(), Activity
-  // Android belum tentu siap nerima intent ke System Settings, jadi
-  // requestExactAlarmsPermission() bisa gagal diam-diam tanpa error.
-  // Diminta di HomePage.initState() setelah frame pertama selesai render.
-
   runApp(const NftWlTrackerApp());
 }
 
@@ -83,8 +55,6 @@ class WlEntry {
   bool hasTime; // whether the time-of-day part of mintDate was set by user
   int? quantity; // optional
   String? twitterLink; // optional
-  bool reminderEnabled;
-  int reminderMinutes; // how many minutes before mint to notify (1-10)
   final DateTime createdAt;
 
   WlEntry({
@@ -95,8 +65,6 @@ class WlEntry {
     this.hasTime = false,
     this.quantity,
     this.twitterLink,
-    this.reminderEnabled = false,
-    this.reminderMinutes = 10,
     required this.createdAt,
   });
 
@@ -108,8 +76,6 @@ class WlEntry {
         'hasTime': hasTime,
         'quantity': quantity,
         'twitterLink': twitterLink,
-        'reminderEnabled': reminderEnabled,
-        'reminderMinutes': reminderMinutes,
         'createdAt': createdAt.toIso8601String(),
       };
 
@@ -124,8 +90,6 @@ class WlEntry {
       hasTime: json['hasTime'] as bool? ?? false,
       quantity: json['quantity'] as int?,
       twitterLink: json['twitterLink'] as String?,
-      reminderEnabled: json['reminderEnabled'] as bool? ?? false,
-      reminderMinutes: json['reminderMinutes'] as int? ?? 10,
       createdAt: json['createdAt'] != null
           ? DateTime.tryParse(json['createdAt'] as String) ?? DateTime.now()
           : DateTime.now(),
@@ -150,63 +114,6 @@ String formatDateTime(DateTime d, bool hasTime) {
   return '$datePart, ${_twoDigits(d.hour)}:${_twoDigits(d.minute)}';
 }
 
-/// Derives a stable 31-bit notification id from an entry's id so the same
-/// entry always maps to the same notification (needed to cancel/replace it).
-int notifIdFor(String entryId) => entryId.hashCode & 0x7FFFFFFF;
-
-Future<void> cancelReminder(String entryId) async {
-  await flutterLocalNotificationsPlugin.cancel(notifIdFor(entryId));
-}
-
-/// Result of trying to schedule a reminder, so the UI can tell the user
-/// exactly why nothing was scheduled instead of failing silently.
-enum ScheduleResult { scheduled, notEnabled, timeAlreadyPast }
-
-/// Cancels any existing reminder for this entry, then schedules a new one
-/// if the entry has a reminder enabled with a valid future fire time.
-Future<ScheduleResult> scheduleReminder(WlEntry entry) async {
-  await cancelReminder(entry.id);
-
-  if (!entry.reminderEnabled || entry.mintDate == null || !entry.hasTime) {
-    return ScheduleResult.notEnabled;
-  }
-
-  final fireTime =
-      entry.mintDate!.subtract(Duration(minutes: entry.reminderMinutes));
-  if (fireTime.isBefore(DateTime.now())) {
-    debugPrint(
-        'SKIP SCHEDULE: fireTime $fireTime already before now ${DateTime.now()}');
-    return ScheduleResult.timeAlreadyPast; // don't schedule the past
-  }
-
-  final tzTime = tz.TZDateTime.from(fireTime, tz.local);
-  debugPrint('SCHEDULING notif id=${notifIdFor(entry.id)} at $tzTime');
-
-  await flutterLocalNotificationsPlugin.zonedSchedule(
-    notifIdFor(entry.id),
-    'Mint sebentar lagi! ðŸš¨',
-    '${entry.name} (${entry.type.label}) mint dalam ${entry.reminderMinutes} menit',
-    tzTime,
-    const NotificationDetails(
-      android: AndroidNotificationDetails(
-        'mint_reminders',
-        'Pengingat Mint NFT',
-        channelDescription: 'Notifikasi pengingat sebelum waktu mint NFT',
-        importance: Importance.high,
-        priority: Priority.high,
-      ),
-    ),
-    // alarmClock = prioritas TERTINGGI yang Android punya buat alarm,
-    // sama kayak yang dipakai app Jam/Alarm asli. Nembus Doze mode total
-    // dan JAUH lebih dihormati sama battery manager OEM (vivo/iQOO/Xiaomi)
-    // dibanding exactAllowWhileIdle biasa.
-    androidScheduleMode: AndroidScheduleMode.alarmClock,
-    uiLocalNotificationDateInterpretation:
-        UILocalNotificationDateInterpretation.absoluteTime,
-  );
-  return ScheduleResult.scheduled;
-}
-
 // ---------------------------------------------------------------------------
 // Home page
 // ---------------------------------------------------------------------------
@@ -222,44 +129,23 @@ class _HomePageState extends State<HomePage> {
   List<WlEntry> _entries = [];
   bool _loading = true;
 
+  bool _searching = false;
+  final TextEditingController _searchCtrl = TextEditingController();
+  String _query = '';
+
   @override
   void initState() {
     super.initState();
     _load();
-    // Diminta SETELAH frame pertama selesai render, bukan di main() sebelum
-    // runApp(). Ini penting: kalau diminta terlalu awal, intent ke System
-    // Settings (buat exact alarm) bisa gagal diam-diam karena Activity-nya
-    // belum sepenuhnya siap.
-    WidgetsBinding.instance.addPostFrameCallback((_) => _requestPermissions());
+    _searchCtrl.addListener(() {
+      setState(() => _query = _searchCtrl.text.trim().toLowerCase());
+    });
   }
 
-  Future<void> _requestPermissions() async {
-    final androidImpl = flutterLocalNotificationsPlugin
-        .resolvePlatformSpecificImplementation<
-            AndroidFlutterLocalNotificationsPlugin>();
-
-    final notifGranted = await androidImpl?.requestNotificationsPermission();
-    debugPrint('NOTIF PERMISSION GRANTED: $notifGranted');
-
-    // Wajib diminta terpisah dari izin notifikasi biasa. Tanpa ini,
-    // zonedSchedule dengan AndroidScheduleMode.exactAllowWhileIdle akan
-    // gagal/di-downgrade diam-diam di Android 12+ (termasuk semua HP
-    // berbasis OriginOS/FuntouchOS/MIUI/ColorOS).
-    final exactGranted = await androidImpl?.requestExactAlarmsPermission();
-    debugPrint('EXACT ALARM PERMISSION GRANTED: $exactGranted');
-
-    // Ini yang sering kelewat: cuma nyalain "No restriction" manual di
-    // Settings OEM (vivo/iQOO/Xiaomi/dll) SERING gak cukup, karena itu
-    // toggle custom OEM sendiri, bukan API resmi Android. Minta lewat
-    // dialog sistem resmi ini jauh lebih dihormati sama battery manager
-    // OEM dibanding toggle manual, dan ini yang dipakai app-app kayak
-    // aplikasi tabungan/alarm yang reminder-nya reliable.
-    final batteryStatus = await ph.Permission.ignoreBatteryOptimizations.status;
-    debugPrint('BATTERY OPT IGNORED (before): $batteryStatus');
-    if (!batteryStatus.isGranted) {
-      final result = await ph.Permission.ignoreBatteryOptimizations.request();
-      debugPrint('BATTERY OPT IGNORED (after request): $result');
-    }
+  @override
+  void dispose() {
+    _searchCtrl.dispose();
+    super.dispose();
   }
 
   Future<void> _load() async {
@@ -280,32 +166,26 @@ class _HomePageState extends State<HomePage> {
       _entries = loaded;
       _loading = false;
     });
-
-    // Defensive resync: make sure every entry's reminder is (re)scheduled,
-    // in case something changed since the app was last opened.
-    for (final e in loaded) {
-      await scheduleReminder(e); // ScheduleResult ignored here on purpose
-    }
   }
 
-  Future<void> _save() async {
+  Future<void> _persist() async {
     final prefs = await SharedPreferences.getInstance();
-    final encoded = jsonEncode(_entries.map((e) => e.toJson()).toList());
-    await prefs.setString('wl_entries', encoded);
+    final raw = jsonEncode(_entries.map((e) => e.toJson()).toList());
+    await prefs.setString('wl_entries', raw);
   }
 
-  List<WlEntry> get _sorted {
-    final withDate = _entries.where((e) => e.mintDate != null).toList()
-      ..sort((a, b) => a.mintDate!.compareTo(b.mintDate!));
-    final withoutDate = _entries.where((e) => e.mintDate == null).toList()
-      ..sort((a, b) => a.createdAt.compareTo(b.createdAt));
-    return [...withDate, ...withoutDate];
+  List<WlEntry> get _visibleEntries {
+    if (_query.isEmpty) return _entries;
+    return _entries.where((e) {
+      return e.name.toLowerCase().contains(_query) ||
+          (e.twitterLink ?? '').toLowerCase().contains(_query);
+    }).toList();
   }
 
   Future<void> _openAddEdit({WlEntry? entry}) async {
     final result = await Navigator.push<_AddEditResult>(
       context,
-      MaterialPageRoute(builder: (_) => AddEditPage(entry: entry)),
+      MaterialPageRoute(builder: (_) => AddEditWlPage(entry: entry)),
     );
     if (result == null) return;
 
@@ -314,205 +194,70 @@ class _HomePageState extends State<HomePage> {
         _entries.removeWhere((e) => e.id == entry.id);
       } else if (result.entry != null) {
         final idx = _entries.indexWhere((e) => e.id == result.entry!.id);
-        if (idx >= 0) {
-          _entries[idx] = result.entry!;
+        if (idx == -1) {
+          _entries.insert(0, result.entry!);
         } else {
-          _entries.add(result.entry!);
+          _entries[idx] = result.entry!;
         }
       }
     });
-    _save();
-
-    if (result.deleted && entry != null) {
-      await cancelReminder(entry.id);
-    } else if (result.entry != null) {
-      final scheduleResult = await scheduleReminder(result.entry!);
-      if (scheduleResult == ScheduleResult.timeAlreadyPast && mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text(
-              'Waktu reminder sudah lewat, notifikasi tidak dijadwalkan. '
-              'Coba pilih waktu mint yang lebih jauh dari sekarang.',
-            ),
-            duration: Duration(seconds: 4),
-          ),
-        );
-      }
-    }
-  }
-
-  Future<void> _delete(WlEntry entry) async {
-    setState(() => _entries.removeWhere((e) => e.id == entry.id));
-    await _save();
-    await cancelReminder(entry.id);
-  }
-
-  Future<void> _openTwitter(String link) async {
-    var url = link.trim();
-    if (!url.startsWith('http://') && !url.startsWith('https://')) {
-      url = 'https://$url';
-    }
-    final uri = Uri.tryParse(url);
-    if (uri == null) return;
-    try {
-      await launchUrl(uri, mode: LaunchMode.externalApplication);
-    } catch (_) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Gagal membuka link Twitter')),
-        );
-      }
-    }
+    await _persist();
   }
 
   @override
   Widget build(BuildContext context) {
-    final list = _sorted;
     final gtdCount = _entries.where((e) => e.type == WlType.gtd).length;
     final fcfsCount = _entries.where((e) => e.type == WlType.fcfs).length;
+    final visible = _visibleEntries;
+
     return Scaffold(
       appBar: AppBar(
-        title: const Text('NFT WL Tracker',
-            style: TextStyle(fontWeight: FontWeight.bold)),
+        title: _searching
+            ? TextField(
+                controller: _searchCtrl,
+                autofocus: true,
+                style: const TextStyle(fontSize: 16, color: Colors.white),
+                decoration: const InputDecoration(
+                  hintText: 'Cari nama WL atau link Twitter...',
+                  hintStyle: TextStyle(color: Colors.grey),
+                  border: InputBorder.none,
+                ),
+              )
+            : const Text('NFT WL Tracker',
+                style: TextStyle(fontWeight: FontWeight.bold)),
         actions: [
-          // TODO: hapus tombol ini setelah notifikasi dikonfirmasi jalan.
-          // Menekannya harus langsung menampilkan notifikasi (tanpa
-          // menunggu jadwal), untuk memisahkan masalah "notif dasar
-          // gak jalan" dari masalah "scheduling/exact alarm gak jalan".
           IconButton(
-            tooltip: 'Test Notif',
-            icon: const Icon(Icons.notifications_active_outlined),
-            onPressed: () async {
-              await flutterLocalNotificationsPlugin.show(
-                999999,
-                'Test Notifikasi',
-                'Kalau ini muncul, notifikasi dasar sudah OK.',
-                const NotificationDetails(
-                  android: AndroidNotificationDetails(
-                    'mint_reminders',
-                    'Pengingat Mint NFT',
-                    importance: Importance.high,
-                    priority: Priority.high,
-                  ),
-                ),
-              );
-            },
-          ),
-          // TODO: hapus tombol ini juga setelah selesai debug. Nampilin
-          // status izin langsung di layar, gak perlu ADB/laptop.
-          IconButton(
-            tooltip: 'Cek Izin',
-            icon: const Icon(Icons.bug_report_outlined),
-            onPressed: () async {
-              final androidImpl = flutterLocalNotificationsPlugin
-                  .resolvePlatformSpecificImplementation<
-                      AndroidFlutterLocalNotificationsPlugin>();
-
-              final notifEnabled =
-                  await androidImpl?.areNotificationsEnabled();
-              final exactAllowed =
-                  await androidImpl?.canScheduleExactNotifications();
-              final batteryIgnored =
-                  await ph.Permission.ignoreBatteryOptimizations.status;
-              final now = DateTime.now();
-              final tzNow = tz.TZDateTime.now(tz.local);
-
-              if (!context.mounted) return;
-              showDialog(
-                context: context,
-                builder: (_) => AlertDialog(
-                  title: const Text('Status Izin & Waktu'),
-                  content: Column(
-                    mainAxisSize: MainAxisSize.min,
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text('Izin notifikasi: ${notifEnabled ?? "null (error)"}'),
-                      const SizedBox(height: 6),
-                      Text('Izin exact alarm: ${exactAllowed ?? "null (error)"}'),
-                      const SizedBox(height: 6),
-                      Text('Battery opt diabaikan: ${batteryIgnored.isGranted}'),
-                      const SizedBox(height: 6),
-                      Text('Waktu device (lokal): $now'),
-                      const SizedBox(height: 6),
-                      Text('Waktu tz.local: $tzNow'),
-                      const SizedBox(height: 6),
-                      Text('Zona waktu terdeteksi: ${tz.local.name}'),
-                    ],
-                  ),
-                  actions: [
-                    TextButton(
-                      onPressed: () async {
-                        Navigator.pop(context);
-                        await ph.Permission.ignoreBatteryOptimizations
-                            .request();
-                      },
-                      child: const Text('Minta Izin Battery'),
-                    ),
-                    TextButton(
-                      onPressed: () => Navigator.pop(context),
-                      child: const Text('Tutup'),
-                    ),
-                  ],
-                ),
-              );
-            },
-          ),
-          // TODO: hapus tombol ini juga setelah selesai debug. Nge-tes
-          // jalur zonedSchedule yang PERSIS sama kayak reminder beneran,
-          // tapi 15 detik dari sekarang, biar cepet ketauan exact alarm
-          // delivery-nya jalan atau enggak, terlepas dari logic tanggal
-          // di form Add/Edit WL.
-          IconButton(
-            tooltip: 'Test Terjadwal 15 detik',
-            icon: const Icon(Icons.timer_outlined),
-            onPressed: () async {
-              final fireAt =
-                  tz.TZDateTime.now(tz.local).add(const Duration(seconds: 15));
-              await flutterLocalNotificationsPlugin.zonedSchedule(
-                999998,
-                'Test Terjadwal',
-                'Kalau ini muncul ~15 detik setelah kamu pencet tombol, zonedSchedule OK.',
-                fireAt,
-                const NotificationDetails(
-                  android: AndroidNotificationDetails(
-                    'mint_reminders',
-                    'Pengingat Mint NFT',
-                    importance: Importance.high,
-                    priority: Priority.high,
-                  ),
-                ),
-                androidScheduleMode: AndroidScheduleMode.alarmClock,
-                uiLocalNotificationDateInterpretation:
-                    UILocalNotificationDateInterpretation.absoluteTime,
-              );
-              if (!context.mounted) return;
-              ScaffoldMessenger.of(context).showSnackBar(
-                SnackBar(
-                  content: Text(
-                      'Dijadwalkan buat $fireAt. Minimize app (jangan force-close), tunggu 15 detik.'),
-                  duration: const Duration(seconds: 4),
-                ),
-              );
+            tooltip: _searching ? 'Tutup pencarian' : 'Cari WL',
+            icon: Icon(_searching ? Icons.close : Icons.search),
+            onPressed: () {
+              setState(() {
+                if (_searching) {
+                  _searching = false;
+                  _searchCtrl.clear();
+                } else {
+                  _searching = true;
+                }
+              });
             },
           ),
         ],
       ),
       body: Column(
         children: [
-          if (_entries.isNotEmpty)
+          if (_entries.isNotEmpty && !_searching)
             Padding(
               padding: const EdgeInsets.fromLTRB(16, 12, 16, 0),
               child: Row(
                 children: [
                   _SummaryChip(
                     label: 'GTD',
-                    count: gtdCount,
+                    value: gtdCount,
                     color: WlType.gtd.color,
                   ),
-                  const SizedBox(width: 10),
+                  const SizedBox(width: 12),
                   _SummaryChip(
                     label: 'FCFS',
-                    count: fcfsCount,
+                    value: fcfsCount,
                     color: WlType.fcfs.color,
                   ),
                 ],
@@ -521,57 +266,34 @@ class _HomePageState extends State<HomePage> {
           Expanded(
             child: _loading
                 ? const Center(child: CircularProgressIndicator())
-                : list.isEmpty
-                    ? _buildEmpty()
-                    : ListView.builder(
-                        padding: const EdgeInsets.fromLTRB(12, 12, 12, 88),
-                        itemCount: list.length,
-                        itemBuilder: (context, i) {
-                          final e = list[i];
-                          return _WlCard(
-                            entry: e,
-                            onTap: () => _openAddEdit(entry: e),
-                            onDelete: () => _delete(e),
-                            onTwitterTap: e.twitterLink != null &&
-                                    e.twitterLink!.trim().isNotEmpty
-                                ? () => _openTwitter(e.twitterLink!)
-                                : null,
-                          );
-                        },
-                      ),
+                : _entries.isEmpty
+                    ? _EmptyState(onAdd: () => _openAddEdit())
+                    : visible.isEmpty
+                        ? const _EmptyState(
+                            icon: Icons.search_off,
+                            title: 'Gak ketemu',
+                            subtitle:
+                                'Gak ada WL yang cocok sama pencarian kamu.',
+                          )
+                        : ListView.builder(
+                            padding: const EdgeInsets.fromLTRB(16, 12, 16, 90),
+                            itemCount: visible.length,
+                            itemBuilder: (context, i) {
+                              final entry = visible[i];
+                              return _WlCard(
+                                entry: entry,
+                                onTap: () => _openAddEdit(entry: entry),
+                              );
+                            },
+                          ),
           ),
         ],
       ),
       floatingActionButton: FloatingActionButton.extended(
         onPressed: () => _openAddEdit(),
+        backgroundColor: const Color(0xFF9B5DE5),
         icon: const Icon(Icons.add),
         label: const Text('Tambah WL'),
-      ),
-    );
-  }
-
-  Widget _buildEmpty() {
-    return Center(
-      child: Padding(
-        padding: const EdgeInsets.all(32),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            const Icon(Icons.confirmation_number_outlined,
-                size: 64, color: Colors.grey),
-            const SizedBox(height: 16),
-            const Text(
-              'Belum ada catatan WL',
-              style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600),
-            ),
-            const SizedBox(height: 8),
-            Text(
-              'Tap tombol "Tambah WL" untuk mulai mencatat whitelist NFT kamu.',
-              textAlign: TextAlign.center,
-              style: TextStyle(color: Colors.grey.shade400),
-            ),
-          ],
-        ),
       ),
     );
   }
@@ -579,12 +301,12 @@ class _HomePageState extends State<HomePage> {
 
 class _SummaryChip extends StatelessWidget {
   final String label;
-  final int count;
+  final int value;
   final Color color;
 
   const _SummaryChip({
     required this.label,
-    required this.count,
+    required this.value,
     required this.color,
   });
 
@@ -592,31 +314,62 @@ class _SummaryChip extends StatelessWidget {
   Widget build(BuildContext context) {
     return Expanded(
       child: Container(
-        padding: const EdgeInsets.symmetric(vertical: 10, horizontal: 12),
+        padding: const EdgeInsets.symmetric(vertical: 14),
+        alignment: Alignment.center,
         decoration: BoxDecoration(
-          color: color.withOpacity(0.14),
-          borderRadius: BorderRadius.circular(12),
-          border: Border.all(color: color.withOpacity(0.4)),
+          color: color.withOpacity(0.12),
+          border: Border.all(color: color.withOpacity(0.5)),
+          borderRadius: BorderRadius.circular(14),
         ),
-        child: Row(
-          mainAxisAlignment: MainAxisAlignment.center,
+        child: Text(
+          '$label = $value',
+          style: TextStyle(
+            color: color,
+            fontWeight: FontWeight.bold,
+            fontSize: 16,
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _EmptyState extends StatelessWidget {
+  final VoidCallback? onAdd;
+  final IconData icon;
+  final String title;
+  final String subtitle;
+
+  const _EmptyState({
+    this.onAdd,
+    this.icon = Icons.confirmation_number_outlined,
+    this.title = 'Belum ada catatan WL',
+    this.subtitle = 'Tap tombol "Tambah WL" untuk mulai mencatat\nwhitelist NFT kamu.',
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Center(
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 32),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
           children: [
+            Icon(icon, size: 64, color: Colors.grey.shade700),
+            const SizedBox(height: 16),
             Text(
-              label,
-              style: TextStyle(
-                color: color,
+              title,
+              style: const TextStyle(
+                fontSize: 18,
                 fontWeight: FontWeight.bold,
-                fontSize: 13,
+                color: Colors.white,
               ),
             ),
-            const SizedBox(width: 6),
+            const SizedBox(height: 8),
             Text(
-              '= $count',
-              style: TextStyle(
-                color: color,
-                fontWeight: FontWeight.bold,
-                fontSize: 13,
-              ),
+              subtitle,
+              textAlign: TextAlign.center,
+              style: TextStyle(color: Colors.grey.shade500, fontSize: 13.5),
             ),
           ],
         ),
@@ -628,193 +381,118 @@ class _SummaryChip extends StatelessWidget {
 class _WlCard extends StatelessWidget {
   final WlEntry entry;
   final VoidCallback onTap;
-  final VoidCallback onDelete;
-  final VoidCallback? onTwitterTap;
 
-  const _WlCard({
-    required this.entry,
-    required this.onTap,
-    required this.onDelete,
-    this.onTwitterTap,
-  });
+  const _WlCard({required this.entry, required this.onTap});
 
   @override
   Widget build(BuildContext context) {
-    final now = DateTime.now();
-    final date = entry.mintDate;
-    final isPast = date != null &&
-        date.isBefore(DateTime(now.year, now.month, now.day));
-    final isSoon = date != null &&
-        !isPast &&
-        date.difference(DateTime(now.year, now.month, now.day)).inDays <= 3;
-
-    return Dismissible(
-      key: ValueKey(entry.id),
-      direction: DismissDirection.endToStart,
-      background: Container(
-        alignment: Alignment.centerRight,
-        padding: const EdgeInsets.symmetric(horizontal: 20),
-        margin: const EdgeInsets.only(bottom: 10),
-        decoration: BoxDecoration(
-          color: Colors.redAccent.withOpacity(0.85),
-          borderRadius: BorderRadius.circular(14),
-        ),
-        child: const Icon(Icons.delete, color: Colors.white),
-      ),
-      confirmDismiss: (_) async {
-        return await showDialog<bool>(
-              context: context,
-              builder: (ctx) => AlertDialog(
-                backgroundColor: const Color(0xFF1E1930),
-                title: const Text('Hapus catatan?'),
-                content: Text('"${entry.name}" akan dihapus permanen.'),
-                actions: [
-                  TextButton(
-                    onPressed: () => Navigator.pop(ctx, false),
-                    child: const Text('Batal'),
-                  ),
-                  TextButton(
-                    onPressed: () => Navigator.pop(ctx, true),
-                    child: const Text('Hapus',
-                        style: TextStyle(color: Colors.redAccent)),
-                  ),
-                ],
-              ),
-            ) ??
-            false;
-      },
-      onDismissed: (_) => onDelete(),
+    return InkWell(
+      onTap: onTap,
+      borderRadius: BorderRadius.circular(16),
       child: Container(
-        margin: const EdgeInsets.only(bottom: 10),
+        margin: const EdgeInsets.only(bottom: 12),
+        padding: const EdgeInsets.all(16),
         decoration: BoxDecoration(
           color: const Color(0xFF161222),
-          borderRadius: BorderRadius.circular(14),
-          border: isSoon
-              ? Border.all(color: const Color(0xFF9B5DE5), width: 1.2)
-              : null,
+          borderRadius: BorderRadius.circular(16),
+          border: Border.all(color: entry.type.color.withOpacity(0.5)),
         ),
-        child: Material(
-          color: Colors.transparent,
-          child: InkWell(
-            borderRadius: BorderRadius.circular(14),
-            onTap: onTap,
-            child: Padding(
-              padding: const EdgeInsets.all(14),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Expanded(
+                  child: Text(
+                    entry.name,
+                    style: const TextStyle(
+                      fontSize: 17,
+                      fontWeight: FontWeight.bold,
+                      color: Colors.white,
+                    ),
+                  ),
+                ),
+                Container(
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                  decoration: BoxDecoration(
+                    color: entry.type.color.withOpacity(0.18),
+                    borderRadius: BorderRadius.circular(20),
+                  ),
+                  child: Text(
+                    entry.type.label,
+                    style: TextStyle(
+                      color: entry.type.color,
+                      fontWeight: FontWeight.bold,
+                      fontSize: 12.5,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+            if (entry.mintDate != null) ...[
+              const SizedBox(height: 8),
+              Row(
                 children: [
-                  Row(
-                    children: [
-                      Expanded(
-                        child: Text(
-                          entry.name,
-                          style: const TextStyle(
-                              fontSize: 16, fontWeight: FontWeight.bold),
-                          overflow: TextOverflow.ellipsis,
-                        ),
-                      ),
-                      Container(
-                        padding: const EdgeInsets.symmetric(
-                            horizontal: 10, vertical: 4),
-                        decoration: BoxDecoration(
-                          color: entry.type.color.withOpacity(0.18),
-                          borderRadius: BorderRadius.circular(20),
-                        ),
-                        child: Text(
-                          entry.type.label,
-                          style: TextStyle(
-                            color: entry.type.color,
-                            fontWeight: FontWeight.bold,
-                            fontSize: 12,
-                          ),
-                        ),
-                      ),
-                    ],
-                  ),
-                  const SizedBox(height: 8),
-                  Row(
-                    children: [
-                      Icon(Icons.event,
-                          size: 15,
-                          color: isPast
-                              ? Colors.grey
-                              : (isSoon
-                                  ? const Color(0xFF9B5DE5)
-                                  : Colors.grey.shade400)),
-                      const SizedBox(width: 4),
-                      Text(
-                        date != null
-                            ? formatDateTime(date, entry.hasTime) +
-                                (isPast ? ' (lewat)' : '')
-                            : 'Tanggal belum ditentukan',
-                        style: TextStyle(
-                          fontSize: 12.5,
-                          color: isPast
-                              ? Colors.grey
-                              : (isSoon
-                                  ? const Color(0xFF9B5DE5)
-                                  : Colors.grey.shade400),
-                          fontWeight:
-                              isSoon ? FontWeight.w600 : FontWeight.normal,
-                        ),
-                      ),
-                      if (entry.quantity != null) ...[
-                        const SizedBox(width: 14),
-                        Icon(Icons.confirmation_number,
-                            size: 14, color: Colors.grey.shade400),
-                        const SizedBox(width: 4),
-                        Text('${entry.quantity}',
-                            style: TextStyle(
-                                fontSize: 12.5, color: Colors.grey.shade400)),
-                      ],
-                    ],
-                  ),
-                  if (onTwitterTap != null && entry.twitterLink != null) ...[
-                    const SizedBox(height: 8),
-                    InkWell(
-                      onTap: onTwitterTap,
-                      child: Row(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          const Text('ðŸ”—', style: TextStyle(fontSize: 14)),
-                          const SizedBox(width: 5),
-                          Flexible(
-                            child: Text(
-                              entry.twitterLink!,
-                              style: const TextStyle(
-                                fontSize: 13,
-                                color: Color(0xFF1DA1F2),
-                                decoration: TextDecoration.underline,
-                                decorationColor: Color(0xFF1DA1F2),
-                              ),
-                              overflow: TextOverflow.ellipsis,
-                            ),
-                          ),
-                        ],
-                      ),
+                  const Icon(Icons.calendar_today,
+                      size: 15, color: Color(0xFF9B5DE5)),
+                  const SizedBox(width: 6),
+                  Text(
+                    formatDateTime(entry.mintDate!, entry.hasTime),
+                    style: const TextStyle(
+                      color: Color(0xFF9B5DE5),
+                      fontWeight: FontWeight.w600,
+                      fontSize: 13.5,
                     ),
-                  ],
-                  if (entry.reminderEnabled &&
-                      entry.hasTime &&
-                      date != null &&
-                      !isPast) ...[
-                    const SizedBox(height: 6),
-                    Row(
-                      children: [
-                        const Text('ðŸ””', style: TextStyle(fontSize: 12)),
-                        const SizedBox(width: 4),
-                        Text(
-                          'Diingatkan ${entry.reminderMinutes} menit sebelum mint',
-                          style: TextStyle(
-                              fontSize: 11.5, color: Colors.grey.shade500),
-                        ),
-                      ],
-                    ),
-                  ],
+                  ),
                 ],
               ),
-            ),
-          ),
+            ],
+            if (entry.quantity != null) ...[
+              const SizedBox(height: 6),
+              Text('Jumlah: ${entry.quantity}',
+                  style: TextStyle(color: Colors.grey.shade400, fontSize: 13)),
+            ],
+            if (entry.twitterLink != null &&
+                entry.twitterLink!.trim().isNotEmpty) ...[
+              const SizedBox(height: 6),
+              Row(
+                children: [
+                  const Text('Link:',
+                      style: TextStyle(fontSize: 12.5, color: Colors.grey)),
+                  const SizedBox(width: 6),
+                  Expanded(
+                    child: InkWell(
+                      onTap: () async {
+                        var link = entry.twitterLink!.trim();
+                        if (!link.startsWith('http')) link = 'https://$link';
+                        final uri = Uri.tryParse(link);
+                        if (uri != null) {
+                          final ok = await launchUrl(uri,
+                              mode: LaunchMode.externalApplication);
+                          if (!ok && context.mounted) {
+                            ScaffoldMessenger.of(context).showSnackBar(
+                              const SnackBar(
+                                  content: Text('Gagal membuka link Twitter')),
+                            );
+                          }
+                        }
+                      },
+                      child: Text(
+                        entry.twitterLink!,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(
+                          color: Colors.lightBlueAccent,
+                          fontSize: 13,
+                          decoration: TextDecoration.underline,
+                        ),
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ],
+          ],
         ),
       ),
     );
@@ -822,7 +500,7 @@ class _WlCard extends StatelessWidget {
 }
 
 // ---------------------------------------------------------------------------
-// Add / Edit page
+// Add/Edit page
 // ---------------------------------------------------------------------------
 
 class _AddEditResult {
@@ -831,24 +509,23 @@ class _AddEditResult {
   _AddEditResult({this.entry, this.deleted = false});
 }
 
-class AddEditPage extends StatefulWidget {
+class AddEditWlPage extends StatefulWidget {
   final WlEntry? entry;
-  const AddEditPage({super.key, this.entry});
+  const AddEditWlPage({super.key, this.entry});
 
   @override
-  State<AddEditPage> createState() => _AddEditPageState();
+  State<AddEditWlPage> createState() => _AddEditWlPageState();
 }
 
-class _AddEditPageState extends State<AddEditPage> {
+class _AddEditWlPageState extends State<AddEditWlPage> {
   final _formKey = GlobalKey<FormState>();
-  late TextEditingController _nameCtrl;
-  late TextEditingController _quantityCtrl;
-  late TextEditingController _twitterCtrl;
+  late final TextEditingController _nameCtrl;
+  late final TextEditingController _quantityCtrl;
+  late final TextEditingController _twitterCtrl;
+
   WlType _type = WlType.gtd;
   DateTime? _mintDate;
   TimeOfDay? _mintTime;
-  bool _reminderEnabled = false;
-  int _reminderMinutes = 10;
 
   bool get _isEditing => widget.entry != null;
 
@@ -862,11 +539,10 @@ class _AddEditPageState extends State<AddEditPage> {
     _twitterCtrl = TextEditingController(text: e?.twitterLink ?? '');
     _type = e?.type ?? WlType.gtd;
     _mintDate = e?.mintDate;
-    if (e != null && e.hasTime && e.mintDate != null) {
-      _mintTime = TimeOfDay(hour: e.mintDate!.hour, minute: e.mintDate!.minute);
+    if (e?.mintDate != null && e!.hasTime) {
+      _mintTime =
+          TimeOfDay(hour: e.mintDate!.hour, minute: e.mintDate!.minute);
     }
-    _reminderEnabled = e?.reminderEnabled ?? false;
-    _reminderMinutes = e?.reminderMinutes ?? 10;
   }
 
   @override
@@ -883,17 +559,13 @@ class _AddEditPageState extends State<AddEditPage> {
       context: context,
       initialDate: _mintDate ?? now,
       firstDate: DateTime(now.year - 1),
-      lastDate: DateTime(now.year + 3),
-      builder: (ctx, child) => Theme(
-        data: Theme.of(ctx).copyWith(
-          colorScheme: Theme.of(ctx).colorScheme.copyWith(
-                primary: const Color(0xFF9B5DE5),
-              ),
-        ),
-        child: child!,
-      ),
+      lastDate: DateTime(now.year + 5),
     );
-    if (picked != null) setState(() => _mintDate = picked);
+    if (picked != null) {
+      setState(() {
+        _mintDate = DateTime(picked.year, picked.month, picked.day);
+      });
+    }
   }
 
   Future<void> _pickTime() async {
@@ -906,47 +578,37 @@ class _AddEditPageState extends State<AddEditPage> {
     final picked = await showTimePicker(
       context: context,
       initialTime: _mintTime ?? TimeOfDay.now(),
-      builder: (ctx, child) => Theme(
-        data: Theme.of(ctx).copyWith(
-          colorScheme: Theme.of(ctx).colorScheme.copyWith(
-                primary: const Color(0xFF9B5DE5),
-              ),
-        ),
-        child: child!,
-      ),
     );
-    if (picked != null) setState(() => _mintTime = picked);
+    if (picked != null) {
+      setState(() => _mintTime = picked);
+    }
   }
 
   void _save() {
     if (!_formKey.currentState!.validate()) return;
+    final name = _nameCtrl.text.trim();
+    if (name.isEmpty) return;
+
+    DateTime? finalDate = _mintDate;
+    bool hasTime = false;
+    if (finalDate != null && _mintTime != null) {
+      finalDate = DateTime(finalDate.year, finalDate.month, finalDate.day,
+          _mintTime!.hour, _mintTime!.minute);
+      hasTime = true;
+    }
 
     final quantityText = _quantityCtrl.text.trim();
     final twitterText = _twitterCtrl.text.trim();
 
-    DateTime? combinedDate = _mintDate;
-    final hasTime = _mintDate != null && _mintTime != null;
-    if (hasTime) {
-      combinedDate = DateTime(
-        _mintDate!.year,
-        _mintDate!.month,
-        _mintDate!.day,
-        _mintTime!.hour,
-        _mintTime!.minute,
-      );
-    }
-
     final entry = WlEntry(
       id: widget.entry?.id ??
-          DateTime.now().millisecondsSinceEpoch.toString(),
-      name: _nameCtrl.text.trim(),
+          DateTime.now().microsecondsSinceEpoch.toString(),
+      name: name,
       type: _type,
-      mintDate: combinedDate,
+      mintDate: finalDate,
       hasTime: hasTime,
       quantity: quantityText.isEmpty ? null : int.tryParse(quantityText),
       twitterLink: twitterText.isEmpty ? null : twitterText,
-      reminderEnabled: _reminderEnabled && hasTime,
-      reminderMinutes: _reminderMinutes,
       createdAt: widget.entry?.createdAt ?? DateTime.now(),
     );
 
@@ -956,19 +618,17 @@ class _AddEditPageState extends State<AddEditPage> {
   Future<void> _confirmDelete() async {
     final confirmed = await showDialog<bool>(
       context: context,
-      builder: (ctx) => AlertDialog(
-        backgroundColor: const Color(0xFF1E1930),
-        title: const Text('Hapus catatan?'),
+      builder: (_) => AlertDialog(
+        title: const Text('Hapus Catatan?'),
         content: Text('"${widget.entry!.name}" akan dihapus permanen.'),
         actions: [
           TextButton(
-            onPressed: () => Navigator.pop(ctx, false),
+            onPressed: () => Navigator.pop(context, false),
             child: const Text('Batal'),
           ),
           TextButton(
-            onPressed: () => Navigator.pop(ctx, true),
-            child:
-                const Text('Hapus', style: TextStyle(color: Colors.redAccent)),
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('Hapus', style: TextStyle(color: Colors.red)),
           ),
         ],
       ),
@@ -986,8 +646,9 @@ class _AddEditPageState extends State<AddEditPage> {
         actions: [
           if (_isEditing)
             IconButton(
-              onPressed: _confirmDelete,
+              tooltip: 'Hapus',
               icon: const Icon(Icons.delete_outline),
+              onPressed: _confirmDelete,
             ),
         ],
       ),
@@ -1002,14 +663,12 @@ class _AddEditPageState extends State<AddEditPage> {
             TextFormField(
               controller: _nameCtrl,
               style: const TextStyle(fontSize: 16),
-              decoration: _fieldDecoration('Contoh: Pudgy Penguins'),
-              textCapitalization: TextCapitalization.words,
+              decoration: _fieldDecoration('Contoh: Lokal Pride'),
               validator: (v) =>
                   (v == null || v.trim().isEmpty) ? 'Nama wajib diisi' : null,
             ),
             const SizedBox(height: 20),
-            const Text('Tipe',
-                style: TextStyle(color: Colors.grey, fontSize: 13)),
+            const Text('Tipe', style: TextStyle(color: Colors.grey, fontSize: 13)),
             const SizedBox(height: 8),
             Row(
               children: [
@@ -1107,61 +766,6 @@ class _AddEditPageState extends State<AddEditPage> {
                 ),
               ),
             ),
-            if (_mintDate != null && _mintTime != null) ...[
-              const SizedBox(height: 20),
-              const Text('Notifikasi Pengingat',
-                  style: TextStyle(color: Colors.grey, fontSize: 13)),
-              const SizedBox(height: 8),
-              Container(
-                padding: const EdgeInsets.all(14),
-                decoration: BoxDecoration(
-                  color: const Color(0xFF161222),
-                  borderRadius: BorderRadius.circular(12),
-                ),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Row(
-                      children: [
-                        const Expanded(
-                          child: Text(
-                            'Ingatkan sebelum mint',
-                            style: TextStyle(fontSize: 14.5),
-                          ),
-                        ),
-                        Switch(
-                          value: _reminderEnabled,
-                          activeColor: const Color(0xFF9B5DE5),
-                          onChanged: (v) =>
-                              setState(() => _reminderEnabled = v),
-                        ),
-                      ],
-                    ),
-                    if (_reminderEnabled) ...[
-                      const SizedBox(height: 4),
-                      Text(
-                        '$_reminderMinutes menit sebelum waktu mint',
-                        style: const TextStyle(
-                          color: Color(0xFF9B5DE5),
-                          fontWeight: FontWeight.w600,
-                          fontSize: 13.5,
-                        ),
-                      ),
-                      Slider(
-                        value: _reminderMinutes.toDouble(),
-                        min: 1,
-                        max: 10,
-                        divisions: 9,
-                        activeColor: const Color(0xFF9B5DE5),
-                        label: '$_reminderMinutes menit',
-                        onChanged: (v) =>
-                            setState(() => _reminderMinutes = v.round()),
-                      ),
-                    ],
-                  ],
-                ),
-              ),
-            ],
             const SizedBox(height: 20),
             const Text('Jumlah (opsional)',
                 style: TextStyle(color: Colors.grey, fontSize: 13)),
